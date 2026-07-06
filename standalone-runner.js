@@ -30,6 +30,22 @@ const DESCRIPTIONS = [
   'Noise disturbance reported during quiet hours.',
 ];
 
+const ELSEWHERE_ON_CAMPUS_SPECIFICS = [
+  'Near the quad',
+  'Outside the library',
+  'Parking Lot C',
+  'Campus green space behind the gym',
+  'Bus stop on Locust Walk',
+];
+
+const OFF_CAMPUS_SPECIFICS = [
+  'Nearby apartment on Walnut Street',
+  'Local restaurant off campus',
+  'Off-campus house party',
+  'Sidewalk near campus perimeter',
+  'Off-campus parking garage',
+];
+
 function randomChoice(list) {
   return list[Math.floor(Math.random() * list.length)];
 }
@@ -42,14 +58,27 @@ function randomRecentDateTime(daysBack = 7) {
   return `${randomTime.getFullYear()}-${pad(randomTime.getMonth() + 1)}-${pad(randomTime.getDate())}T${pad(randomTime.getHours())}:${pad(randomTime.getMinutes())}`;
 }
 
+const LOCATION_TYPES = ['college', 'elsewhere', 'offcampus'];
+
 function generateRandomIncident() {
-  const house = randomChoice(COLLEGE_HOUSES);
-  return {
+  const locationType = randomChoice(LOCATION_TYPES);
+  const base = {
     dateTime: randomRecentDateTime(),
-    house,
-    room: `Room ${100 + Math.floor(Math.random() * 300)}`,
     description: randomChoice(DESCRIPTIONS),
+    locationType,
   };
+
+  if (locationType === 'college') {
+    return {
+      ...base,
+      house: randomChoice(COLLEGE_HOUSES),
+      room: `Room ${100 + Math.floor(Math.random() * 300)}`,
+    };
+  }
+  if (locationType === 'elsewhere') {
+    return { ...base, specifics: randomChoice(ELSEWHERE_ON_CAMPUS_SPECIFICS) };
+  }
+  return { ...base, specifics: randomChoice(OFF_CAMPUS_SPECIFICS) };
 }
 
 async function performLogin(page) {
@@ -93,12 +122,26 @@ async function createRandomIncident(page, data) {
   // --- Location Date & Time ---
   await page.getByRole('tab', { name: 'Location Date & Time' }).click();
   await page.getByLabel('Date and Time').fill(data.dateTime);
-  await page.getByRole('radio', { name: 'College Houses or Sansom Place' }).check({ force: true });
-  await page.getByRole('combobox').selectOption(data.house.value);
-  await page.getByPlaceholder('Room or Location').fill(data.room);
+
+  let locationLabel;
+  if (data.locationType === 'college') {
+    await page.getByRole('radio', { name: 'College Houses or Sansom Place' }).check({ force: true });
+    await page.getByRole('combobox').selectOption(data.house.value);
+    await page.getByPlaceholder('Room or Location').fill(data.room);
+    locationLabel = `${data.house.label} — ${data.room}`;
+  } else if (data.locationType === 'elsewhere') {
+    await page.getByRole('radio', { name: 'Elsewhere on campus' }).check({ force: true });
+    await page.getByPlaceholder('Location Specifics').nth(0).fill(data.specifics);
+    locationLabel = `Elsewhere on campus — ${data.specifics}`;
+  } else {
+    await page.getByRole('radio', { name: 'Off-campus' }).check({ force: true });
+    await page.getByPlaceholder('Location Specifics').nth(1).fill(data.specifics);
+    locationLabel = `Off-campus — ${data.specifics}`;
+  }
+
   await page.getByRole('button', { name: 'Save Time & Location' }).click();
   await page.getByText('Incident Updated Successfully').first().waitFor({ timeout: 10000 });
-  console.log(`📍 Saved location: ${data.house.label} — ${data.room}`);
+  console.log(`📍 Saved location: ${locationLabel}`);
 
   // --- People (None/Unknown — avoids looking up real student/staff records for synthetic data) ---
   await page.getByRole('tab', { name: 'People' }).click();
