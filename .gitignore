@@ -1,3 +1,5 @@
 node_modules/
 .env
 *-snapshot.html
+auth-state.json
+error-screenshot.png
