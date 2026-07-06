@@ -46,6 +46,20 @@ const OFF_CAMPUS_SPECIFICS = [
   'Off-campus parking garage',
 ];
 
+// "Search Student" looks up the app's own directory. Verified this is synthetic
+// demo data (e.g. emails like "zara.ali.demo@collegehouses.example"), not real
+// students — the app is the -demo instance and shows a "Mode: Demo" badge.
+const STUDENT_SEARCH_LETTERS = ['a', 'b', 'c', 'e', 'j', 'k', 'l', 'm', 'r', 's', 't'];
+
+// University Personnel / Non-Penncard Persons are free-text manual entry (no
+// directory lookup), so any fabricated name here is inherently synthetic.
+const FAKE_FIRST_NAMES = ['Alex', 'Jordan', 'Casey', 'Morgan', 'Riley', 'Sam', 'Taylor', 'Drew'];
+const FAKE_LAST_NAMES = ['Smith', 'Johnson', 'Garcia', 'Chen', 'Patel', 'Brown', 'Davis', 'Lee'];
+const PERSONNEL_TYPES = ['Allied Guard', 'MERT/EMT/Ambulance', 'Fire Department', 'Penn Police', 'Facilities', 'University Official'];
+const NON_PENNCARD_CLASSIFICATIONS = ['Parent/Family', 'Visitor/Guest'];
+
+const PERSON_TYPES = ['unknown', 'student', 'personnel', 'nonpenncard'];
+
 function randomChoice(list) {
   return list[Math.floor(Math.random() * list.length)];
 }
@@ -79,6 +93,109 @@ function generateRandomIncident() {
     return { ...base, specifics: randomChoice(ELSEWHERE_ON_CAMPUS_SPECIFICS) };
   }
   return { ...base, specifics: randomChoice(OFF_CAMPUS_SPECIFICS) };
+}
+
+// The app's #searchPeopleModal intermittently gets left with a stray "show"
+// class — sometimes even before we've opened any modal ourselves. Neither
+// Escape nor manually stripping the "show" class reliably dismisses it (the
+// latter actively made things worse: Bootstrap's JS keeps its own internal
+// "is this modal shown" state, and hacking the class externally desyncs it
+// from that state instead of fixing anything). Clicking the modal's real
+// Close button is the one path that goes through the app's own close logic.
+async function ensureNoModalOpen(page) {
+  const openModal = page.locator('.modal.show').first();
+  if ((await openModal.count()) === 0) return;
+  await openModal.getByRole('button', { name: 'Close' }).first().click({ timeout: 2000 }).catch(() => {});
+  await openModal.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+}
+
+async function closePersonModal(page) {
+  await ensureNoModalOpen(page);
+}
+
+async function addUnknownPerson(page) {
+  await ensureNoModalOpen(page);
+  await page.getByRole('button', { name: 'None/Unknown' }).click();
+  await page.getByRole('textbox').last().fill('UNKNOWN - identity not determined at time of report');
+  await page.getByRole('button', { name: 'Add Description' }).click();
+  await page.getByText('Unknown Personnel inserted successfully').first().waitFor({ timeout: 10000 });
+  await closePersonModal(page);
+  return 'None/Unknown';
+}
+
+async function addUniversityPersonnel(page) {
+  const first = randomChoice(FAKE_FIRST_NAMES);
+  const last = randomChoice(FAKE_LAST_NAMES);
+  const personnelType = randomChoice(PERSONNEL_TYPES);
+
+  await ensureNoModalOpen(page);
+  await page.getByRole('button', { name: 'University Personnel' }).click();
+  await page.getByRole('textbox', { name: 'First Name' }).fill(first);
+  await page.getByRole('textbox', { name: 'Last Name' }).fill(last);
+  await page.getByRole('radio', { name: personnelType }).check({ force: true });
+  await page.getByRole('button', { name: 'Add Person' }).click();
+  await page.getByText('University Personnel inserted successfully').first().waitFor({ timeout: 10000 });
+  await closePersonModal(page);
+  return `University Personnel (${personnelType}): ${first} ${last}`;
+}
+
+async function addNonPenncardPerson(page) {
+  const first = randomChoice(FAKE_FIRST_NAMES);
+  const last = randomChoice(FAKE_LAST_NAMES);
+  const classification = randomChoice(NON_PENNCARD_CLASSIFICATIONS);
+
+  await ensureNoModalOpen(page);
+  await page.getByRole('button', { name: 'Non-Penncard Persons' }).click();
+  await page.getByRole('textbox', { name: 'First Name' }).fill(first);
+  await page.getByRole('textbox', { name: 'Last Name' }).fill(last);
+  await page.getByRole('radio', { name: classification }).check({ force: true });
+  await page.getByRole('button', { name: 'Add Person' }).click();
+  await page.getByText('Non PennCard Personnel inserted successfully').first().waitFor({ timeout: 10000 });
+  await closePersonModal(page);
+  return `Non-Penncard Person (${classification}): ${first} ${last}`;
+}
+
+// Searches the app's own demo student directory and adds a random match.
+// Retries with different name letters/houses since not every combo hits.
+async function tryAddRandomStudent(page, attempts = 3) {
+  for (let i = 0; i < attempts; i++) {
+    await ensureNoModalOpen(page);
+    await page.getByRole('button', { name: 'Search Student' }).click();
+    await page.getByRole('button', { name: 'Search By Name / PennID' }).click();
+
+    const house = randomChoice(COLLEGE_HOUSES);
+    const houseSearchLabel = house.label.split(':')[0].trim();
+    await page.getByRole('textbox', { name: 'Last Name' }).fill(randomChoice(STUDENT_SEARCH_LETTERS));
+    await page.getByRole('combobox', { name: 'House' }).selectOption({ label: houseSearchLabel });
+    await page.getByRole('button', { name: 'Search', exact: true }).click();
+    await page.waitForTimeout(800);
+
+    const addButtons = page.getByRole('button', { name: 'ADD' });
+    const count = await addButtons.count();
+    if (count > 0) {
+      const index = Math.floor(Math.random() * count);
+      await addButtons.nth(index).click();
+      await page.getByText('inserted successfully').first().waitFor({ timeout: 10000 });
+      await closePersonModal(page);
+      return `Student (${houseSearchLabel})`;
+    }
+
+    await closePersonModal(page);
+  }
+  return null;
+}
+
+async function addRandomPerson(page) {
+  const type = randomChoice(PERSON_TYPES);
+
+  if (type === 'student') {
+    const label = await tryAddRandomStudent(page);
+    if (label) return label;
+    // No search hits after retries — fall back to a guaranteed-safe option.
+  }
+  if (type === 'personnel') return addUniversityPersonnel(page);
+  if (type === 'nonpenncard') return addNonPenncardPerson(page);
+  return addUnknownPerson(page);
 }
 
 async function performLogin(page) {
@@ -143,14 +260,13 @@ async function createRandomIncident(page, data) {
   await page.getByText('Incident Updated Successfully').first().waitFor({ timeout: 10000 });
   console.log(`📍 Saved location: ${locationLabel}`);
 
-  // --- People (None/Unknown — avoids looking up real student/staff records for synthetic data) ---
+  // --- People ---
   await page.getByRole('tab', { name: 'People' }).click();
-  await page.getByRole('button', { name: 'None/Unknown' }).click();
-  await page.getByRole('textbox').last().fill('UNKNOWN - identity not determined at time of report');
-  await page.getByRole('button', { name: 'Add Description' }).click();
-  await page.getByText('Unknown Personnel inserted successfully').first().waitFor({ timeout: 10000 });
-  await page.keyboard.press('Escape');
-  console.log('👤 Added None/Unknown person.');
+  const peopleCount = 1 + Math.floor(Math.random() * 3); // 1-3 people
+  for (let i = 0; i < peopleCount; i++) {
+    const label = await addRandomPerson(page);
+    console.log(`👤 Added person: ${label}`);
+  }
 
   // --- Summary ---
   await page.getByRole('tab', { name: 'Summary' }).click();
