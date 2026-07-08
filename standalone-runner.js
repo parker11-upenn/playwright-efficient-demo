@@ -118,14 +118,54 @@ async function closePersonModal(page) {
   await ensureNoModalOpen(page);
 }
 
+// Every added person gets a reviewCard_<id> element — it's actually part of
+// the Review & Submit tab's live preview, which the app keeps in sync via a
+// background AJAX call independent of the success toast on the People tab.
+// That call can lag slightly behind the toast, so reading .last() right after
+// the toast can still return the *previous* card. countPersonCards()/
+// waitForNewPersonCard() bracket each add so we wait for the count to
+// actually increase before reading, avoiding that race. The card is also
+// legitimately CSS-hidden while we're on the People tab (its tab-pane lacks
+// the "show" class), so this reads via textContent() rather than innerText().
+// Its header either contains a P-Number — for Students, None/Unknown, and
+// Non-Penncard Persons, per the app's own anonymization convention — or just
+// a plain name — for University Personnel and CHAS/RHS Team Member, who
+// aren't anonymized.
+function countPersonCards(page) {
+  return page.locator('[id^="reviewCard_"]').count();
+}
+
+async function waitForNewPersonCard(page, previousCount) {
+  await page.waitForFunction(
+    (prevCount) => document.querySelectorAll('[id^="reviewCard_"]').length > prevCount,
+    previousCount,
+    { timeout: 8000 },
+  );
+  const card = page.locator('[id^="reviewCard_"]').last();
+  const headerText = (await card.locator('.card-header').textContent()).replace(/\s+/g, ' ').trim();
+  const pMatch = headerText.match(/\(P(\d+)\)/);
+  if (pMatch) {
+    const name = headerText.replace(/\(P\d+\)/, '').replace(/:\s*$/, '').trim();
+    return { pNumber: `P${pMatch[1]}`, name };
+  }
+  const name = headerText.replace(/:\s*\d+\s*$/, '').replace(/:\s*$/, '').trim();
+  return { pNumber: null, name };
+}
+
+function formatPersonReference({ pNumber, name }) {
+  return pNumber ? `${pNumber} (${name})` : name;
+}
+
 async function addUnknownPerson(page) {
   await ensureNoModalOpen(page);
+  const before = await countPersonCards(page);
   await page.getByRole('button', { name: 'None/Unknown', exact: true }).click();
   await page.getByRole('textbox').last().fill('UNKNOWN - identity not determined at time of report');
   await page.getByRole('button', { name: 'Add Description' }).click();
   await page.getByText('Unknown Personnel inserted successfully').first().waitFor({ timeout: 10000 });
+  const person = await waitForNewPersonCard(page, before);
   await closePersonModal(page);
-  return 'None/Unknown';
+  return { label: 'None/Unknown', reference: formatPersonReference(person), countsAsInvolved: true };
 }
 
 async function addUniversityPersonnel(page) {
@@ -134,14 +174,16 @@ async function addUniversityPersonnel(page) {
   const personnelType = randomChoice(PERSONNEL_TYPES);
 
   await ensureNoModalOpen(page);
+  const before = await countPersonCards(page);
   await page.getByRole('button', { name: 'University Personnel', exact: true }).click();
   await page.getByRole('textbox', { name: 'First Name' }).fill(first);
   await page.getByRole('textbox', { name: 'Last Name' }).fill(last);
   await page.getByRole('radio', { name: personnelType }).check({ force: true });
   await page.getByRole('button', { name: 'Add Person' }).click();
   await page.getByText('University Personnel inserted successfully').first().waitFor({ timeout: 10000 });
+  const person = await waitForNewPersonCard(page, before);
   await closePersonModal(page);
-  return `University Personnel (${personnelType}): ${first} ${last}`;
+  return { label: `University Personnel (${personnelType}): ${first} ${last}`, reference: formatPersonReference(person), countsAsInvolved: true };
 }
 
 async function addNonPenncardPerson(page) {
@@ -150,14 +192,16 @@ async function addNonPenncardPerson(page) {
   const classification = randomChoice(NON_PENNCARD_CLASSIFICATIONS);
 
   await ensureNoModalOpen(page);
+  const before = await countPersonCards(page);
   await page.getByRole('button', { name: 'Non-Penncard Persons', exact: true }).click();
   await page.getByRole('textbox', { name: 'First Name' }).fill(first);
   await page.getByRole('textbox', { name: 'Last Name' }).fill(last);
   await page.getByRole('radio', { name: classification }).check({ force: true });
   await page.getByRole('button', { name: 'Add Person' }).click();
   await page.getByText('Non PennCard Personnel inserted successfully').first().waitFor({ timeout: 10000 });
+  const person = await waitForNewPersonCard(page, before);
   await closePersonModal(page);
-  return `Non-Penncard Person (${classification}): ${first} ${last}`;
+  return { label: `Non-Penncard Person (${classification}): ${first} ${last}`, reference: formatPersonReference(person), countsAsInvolved: true };
 }
 
 // Clicking ADD on a directory result that's already on the incident doesn't
@@ -194,9 +238,14 @@ async function tryAddRandomStudent(page, attempts = 3) {
     const count = await addButtons.count();
     if (count > 0) {
       const index = Math.floor(Math.random() * count);
+      const before = await countPersonCards(page);
       const added = await clickAddAndConfirm(page, addButtons.nth(index), 'inserted successfully');
+      if (added) {
+        const person = await waitForNewPersonCard(page, before);
+        await closePersonModal(page);
+        return { label: `Student (${houseSearchLabel})`, reference: formatPersonReference(person), countsAsInvolved: true };
+      }
       await closePersonModal(page);
-      if (added) return `Student (${houseSearchLabel})`;
       continue;
     }
 
@@ -222,9 +271,17 @@ async function tryAddTeamMember(page, attempts = 3) {
     const count = await addButtons.count();
     if (count > 0) {
       const index = Math.floor(Math.random() * count);
+      const before = await countPersonCards(page);
       const added = await clickAddAndConfirm(page, addButtons.nth(index), 'Staff inserted successfully');
+      if (added) {
+        const person = await waitForNewPersonCard(page, before);
+        await closePersonModal(page);
+        // Verified live: unlike the other four types, a Team Member alone does
+        // NOT satisfy the app's "Involved person(s)" requirement — it's an
+        // ancillary staff reference, not the actual involved party.
+        return { label: `CHAS/RHS Team Member (${department})`, reference: formatPersonReference(person), countsAsInvolved: false };
+      }
       await closePersonModal(page);
-      if (added) return `CHAS/RHS Team Member (${department})`;
       continue;
     }
 
@@ -237,13 +294,13 @@ async function addRandomPerson(page) {
   const type = randomChoice(PERSON_TYPES);
 
   if (type === 'student') {
-    const label = await tryAddRandomStudent(page);
-    if (label) return label;
+    const result = await tryAddRandomStudent(page);
+    if (result) return result;
     // No search hits after retries — fall back to a guaranteed-safe option.
   }
   if (type === 'team') {
-    const label = await tryAddTeamMember(page);
-    if (label) return label;
+    const result = await tryAddTeamMember(page);
+    if (result) return result;
   }
   if (type === 'personnel') return addUniversityPersonnel(page);
   if (type === 'nonpenncard') return addNonPenncardPerson(page);
@@ -315,17 +372,33 @@ async function createRandomIncident(page, data) {
   // --- People ---
   await page.getByRole('tab', { name: 'People' }).click();
   const peopleCount = 1 + Math.floor(Math.random() * 3); // 1-3 people
+  const people = [];
   for (let i = 0; i < peopleCount; i++) {
-    const label = await addRandomPerson(page);
-    console.log(`👤 Added person: ${label}`);
+    const person = await addRandomPerson(page);
+    people.push(person);
+    console.log(`👤 Added person: ${person.label}`);
+  }
+  // A CHAS/RHS Team Member alone doesn't satisfy the app's "Involved
+  // person(s)" requirement (verified live), so if every random pick landed on
+  // that type, add one guaranteed-valid person too.
+  if (!people.some((p) => p.countsAsInvolved)) {
+    const person = await addUnknownPerson(page);
+    people.push(person);
+    console.log(`👤 Added person: ${person.label} (ensuring a qualifying involved person)`);
   }
 
   // --- Summary ---
+  // The app's own help text asks descriptions to cite each involved person by
+  // P-Number (for Students/None-Unknown/Non-Penncard) or name (for staff), so
+  // fold every added person's reference into the description.
+  const peopleClause = `Involved: ${people.map((p) => p.reference).join('; ')}.`;
+  const fullDescription = `${data.description} ${peopleClause}`;
+
   await page.getByRole('tab', { name: 'Summary' }).click();
-  await page.getByPlaceholder('Describe the incident here').fill(data.description);
+  await page.getByPlaceholder('Describe the incident here').fill(fullDescription);
   await page.getByRole('button', { name: 'Save Description' }).click();
   await page.getByText('Description inserted successfully').first().waitFor({ timeout: 10000 });
-  console.log(`🖊️  Saved description: "${data.description}"`);
+  console.log(`🖊️  Saved description: "${fullDescription}"`);
 
   // --- Review & Submit ---
   await page.getByRole('tab', { name: 'Review & Submit' }).click();
