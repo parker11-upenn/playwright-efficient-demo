@@ -58,7 +58,12 @@ const FAKE_LAST_NAMES = ['Smith', 'Johnson', 'Garcia', 'Chen', 'Patel', 'Brown',
 const PERSONNEL_TYPES = ['Allied Guard', 'MERT/EMT/Ambulance', 'Fire Department', 'Penn Police', 'Facilities', 'University Official'];
 const NON_PENNCARD_CLASSIFICATIONS = ['Parent/Family', 'Visitor/Guest'];
 
-const PERSON_TYPES = ['unknown', 'student', 'personnel', 'nonpenncard'];
+// "CHAS/RHS Team Member" also looks up a real directory, but a small one —
+// verified staff there use the same sequential-fake-ID pattern as the
+// synthetic students (PennIDs like 91000001, 91000002).
+const CHAS_DEPARTMENTS = ['CHAS Admin', 'Gregory', 'Harnwell', 'Stouffer'];
+
+const PERSON_TYPES = ['unknown', 'student', 'personnel', 'nonpenncard', 'team'];
 
 function randomChoice(list) {
   return list[Math.floor(Math.random() * list.length)];
@@ -115,7 +120,7 @@ async function closePersonModal(page) {
 
 async function addUnknownPerson(page) {
   await ensureNoModalOpen(page);
-  await page.getByRole('button', { name: 'None/Unknown' }).click();
+  await page.getByRole('button', { name: 'None/Unknown', exact: true }).click();
   await page.getByRole('textbox').last().fill('UNKNOWN - identity not determined at time of report');
   await page.getByRole('button', { name: 'Add Description' }).click();
   await page.getByText('Unknown Personnel inserted successfully').first().waitFor({ timeout: 10000 });
@@ -129,7 +134,7 @@ async function addUniversityPersonnel(page) {
   const personnelType = randomChoice(PERSONNEL_TYPES);
 
   await ensureNoModalOpen(page);
-  await page.getByRole('button', { name: 'University Personnel' }).click();
+  await page.getByRole('button', { name: 'University Personnel', exact: true }).click();
   await page.getByRole('textbox', { name: 'First Name' }).fill(first);
   await page.getByRole('textbox', { name: 'Last Name' }).fill(last);
   await page.getByRole('radio', { name: personnelType }).check({ force: true });
@@ -145,7 +150,7 @@ async function addNonPenncardPerson(page) {
   const classification = randomChoice(NON_PENNCARD_CLASSIFICATIONS);
 
   await ensureNoModalOpen(page);
-  await page.getByRole('button', { name: 'Non-Penncard Persons' }).click();
+  await page.getByRole('button', { name: 'Non-Penncard Persons', exact: true }).click();
   await page.getByRole('textbox', { name: 'First Name' }).fill(first);
   await page.getByRole('textbox', { name: 'Last Name' }).fill(last);
   await page.getByRole('radio', { name: classification }).check({ force: true });
@@ -155,12 +160,27 @@ async function addNonPenncardPerson(page) {
   return `Non-Penncard Person (${classification}): ${first} ${last}`;
 }
 
+// Clicking ADD on a directory result that's already on the incident doesn't
+// throw — it shows a *separate* "Cannot insert duplicate ..." alert while the
+// earlier success toast (from a prior add) is still sitting in the DOM with
+// its old text. Matching on the success text alone is a false positive in
+// that case, so explicitly check for the duplicate error first.
+async function clickAddAndConfirm(page, addButton, successText) {
+  await addButton.click();
+  await page.waitForTimeout(800);
+  const isDuplicate = await page.getByText(/cannot insert duplicate/i).first().isVisible().catch(() => false);
+  if (isDuplicate) return false;
+  await page.getByText(successText).first().waitFor({ timeout: 10000 });
+  return true;
+}
+
 // Searches the app's own demo student directory and adds a random match.
-// Retries with different name letters/houses since not every combo hits.
+// Retries with different name letters/houses/results since not every combo
+// hits, and a repeated combo can land on someone already added.
 async function tryAddRandomStudent(page, attempts = 3) {
   for (let i = 0; i < attempts; i++) {
     await ensureNoModalOpen(page);
-    await page.getByRole('button', { name: 'Search Student' }).click();
+    await page.getByRole('button', { name: 'Search Student', exact: true }).click();
     await page.getByRole('button', { name: 'Search By Name / PennID' }).click();
 
     const house = randomChoice(COLLEGE_HOUSES);
@@ -174,10 +194,38 @@ async function tryAddRandomStudent(page, attempts = 3) {
     const count = await addButtons.count();
     if (count > 0) {
       const index = Math.floor(Math.random() * count);
-      await addButtons.nth(index).click();
-      await page.getByText('inserted successfully').first().waitFor({ timeout: 10000 });
+      const added = await clickAddAndConfirm(page, addButtons.nth(index), 'inserted successfully');
       await closePersonModal(page);
-      return `Student (${houseSearchLabel})`;
+      if (added) return `Student (${houseSearchLabel})`;
+      continue;
+    }
+
+    await closePersonModal(page);
+  }
+  return null;
+}
+
+// Searches the app's own (small) CHAS/RHS staff directory and adds a random
+// match. Retries across departments/results since the pool is tiny and a
+// repeated pick can land on someone already added.
+async function tryAddTeamMember(page, attempts = 3) {
+  for (let i = 0; i < attempts; i++) {
+    await ensureNoModalOpen(page);
+    await page.getByRole('button', { name: 'CHAS/RHS Team Member', exact: true }).click();
+
+    const department = randomChoice(CHAS_DEPARTMENTS);
+    await page.getByRole('combobox').selectOption({ label: department });
+    await page.getByRole('button', { name: 'Search', exact: true }).click();
+    await page.waitForTimeout(800);
+
+    const addButtons = page.getByRole('button', { name: 'ADD' });
+    const count = await addButtons.count();
+    if (count > 0) {
+      const index = Math.floor(Math.random() * count);
+      const added = await clickAddAndConfirm(page, addButtons.nth(index), 'Staff inserted successfully');
+      await closePersonModal(page);
+      if (added) return `CHAS/RHS Team Member (${department})`;
+      continue;
     }
 
     await closePersonModal(page);
@@ -192,6 +240,10 @@ async function addRandomPerson(page) {
     const label = await tryAddRandomStudent(page);
     if (label) return label;
     // No search hits after retries — fall back to a guaranteed-safe option.
+  }
+  if (type === 'team') {
+    const label = await tryAddTeamMember(page);
+    if (label) return label;
   }
   if (type === 'personnel') return addUniversityPersonnel(page);
   if (type === 'nonpenncard') return addNonPenncardPerson(page);
